@@ -1,62 +1,35 @@
-# super-resolution-landsat-sentinel
-# Conception d'une Architecture de Super-Résolution Hybride : Landsat-8 vers Sentinel-2
+# Super-Résolution Hybride : Landsat-8 vers Sentinel-2
 
 ## À propos de ce projet
-Ce dépôt contient le code source et la méthodologie développés dans le cadre du travail de Master de Mohamed Bouzenad, réalisé à la Faculté des géosciences et de l'environnement de l'Université de Lausanne (UNIL) en janvier 2026[cite: 2].
+Ce dépôt héberge le code source et la méthodologie développés dans le cadre du mémoire de Master de Mohamed Bouzenad (Université de Lausanne, 2026) intitulé : *Conception d'une Architecture de Super-Résolution Hybride : Réconciliation de la Fidélité Spectrale et de la Cohérence Perceptive*[cite: 2].
 
-L'objectif de ce projet est de combler l'écart technologique entre les archives historiques Landsat-8 (résolution de 30 mètres) et les standards modernes de Sentinel-2 (résolution de 10 mètres) en explorant le potentiel des réseaux de neurones profonds pour la super-résolution (SISR)[cite: 2]. 
+L'objectif de ce projet est d'utiliser l'apprentissage profond (Deep Learning) pour harmoniser les archives historiques Landsat-8 (30 m) vers les standards de résolution de Sentinel-2 (10 m), en gérant le compromis complexe entre la précision mathématique du signal (radiométrie) et le réalisme visuel des textures[cite: 2].
 
-Le projet évalue trois architectures distinctes :
-*   **Modèle EDSR** : Focalisé sur la fidélité mathématique et spectrale, indispensable aux calculs d'indices comme le NDVI[cite: 2].
-*   **Modèle ESRGAN** : Orienté vers la reconstruction de textures perceptuelles et le réalisme visuel[cite: 2].
-*   **Modèle Hybride (EDSR-GAN)** : Une architecture inédite tentant de concilier la justesse géométrique/spectrale de l'EDSR et les détails texturaux de l'ESRGAN grâce à un fine-tuning et une contrainte de régularisation spectrale (SAM)[cite: 2].
+## Pipeline de Traitement et Codes
 
-## Prérequis et Données
-*   **Google Earth Engine (GEE)** : Le fichier `CodeGEE.txt` contient le script utilisé pour l'extraction automatisée des paires d'images Landsat-8 et Sentinel-2 parfaitement synchrones et co-enregistrées.
+Le processus de traitement est entièrement automatisé, allant de la constitution du jeu de données (Data-Centric AI) jusqu'à l'inférence des modèles de super-résolution.
 
-## Pipeline d'exécution
+### Étape 0 : Curation des données via Google Earth Engine
+*   **`CodeGEE.txt`** : Script JavaScript exécuté sur Google Earth Engine pour extraire un jeu de données mondial représentatif. Il filtre les nuages (masques QA60/MSK_CLOUD), recherche les paires d'images Landsat-8/Sentinel-2 avec un écart maximum de 10 jours, et exporte automatiquement les intersections spatiales avec une projection UTM dynamique[cite: 7].
 
-Le processus complet est divisé en 8 étapes, allant de la préparation des données à l'application des modèles.
+### Phase 1 : Préparation du Dataset
+*   **`1_patch_extracteur.py`** : Pipeline d'extraction et d'alignement. Ce script découpe les images brutes en sous-images, calcule un alignement sub-pixel par corrélation de phase croisée, et filtre les paires de mauvaise qualité à l'aide de masques NoData et des métriques de similarité (SSIM/ZNCC)[cite: 3]. Il divise ensuite le corpus en un jeu d'entraînement (Train) et un jeu de validation (Val)[cite: 3].
+*   **`2_prepare_data.py`** : Script d'optimisation. Il convertit les paires GeoTIFF validées en tuiles (patchs) au format `.npy` pour accélérer drastiquement les temps de lecture lors de l'entraînement[cite: 4]. Il extrait spécifiquement les bandes R, G, B et NIR (Bandes 2, 3, 4, 5 pour L8 et 2, 3, 4, 8 pour S2) via des processus parallèles (multiprocessing)[cite: 4].
 
-### Phase 1 : Préparation des données
-*   **Étape 1 : Extraction & Tri** : Ce script crée deux dossiers (`mon_super_dataset` pour l'apprentissage et `mon_super_dataset_val` pour le test) en répartissant les données selon un ratio de 80% pour l'entraînement et 20% pour la validation[cite: 1].
-    ```bash
-    python 1_patch_extracteur.py --landsat "D:/Donnees/Landsat8" --sentinel "D:/Donnees/Sentinel2" --export "mon_super_dataset" --visu
-    ```
-*   **Étape 2 : Préparation (Conversion)** : Convertit le dossier d'entraînement en fichiers `.npy` pour accélérer le traitement[cite: 1].
-    ```bash
-    python 2_prepare_data.py --l8_dir "mon_super_dataset/landsat8" --s2_dir "mon_super_dataset/sentinel2" --out_dir "dataset_final_npy" --patch 32 --workers 8
-    ```
+### Phase 2 : Modèle EDSR (Fidélité Mathématique et Spectrale)
+*   **`3_Entrainement_EDSR.py`** : Entraîne le réseau de neurones convolutifs EDSR-Lite. Ce script gère l'augmentation de données (rotations/flips), utilise l'accélération *Mixed Precision* (AMP) pour les GPU récents, et génère des grilles de visualisation comparatives (Input/SR/Target) à chaque époque[cite: 5].
+*   **`4_Applique_EDSR.py`** : Applique le modèle EDSR entraîné sur des images satellitaires complètes (Inférence). Pour éviter les artefacts de bords ou de discontinuité, ce script utilise une technique de "Sliding Window" avec recouvrement (overlap) pondérée par un masque de *Hanning*, et met à jour dynamiquement les métadonnées de géoréférencement (Rasterio)[cite: 6].
 
-### Phase 2 : Modèle EDSR (Baseline spectrale)
-*   **Étape 3 : Entraînement EDSR** : Entraîne le modèle sur les données `.npy` pour établir une base géométrique stable[cite: 1].
-    ```bash
-    python 3_Entrainement_EDSR.py --data_dir "dataset_final_npy" --out_dir "resultats_training" --epochs 50 --batch_size 16 --visu
-    ```
-*   **Étape 4 : Application EDSR** : Applique le modèle entraîné sur les 20% de données de validation cachées[cite: 1].
-    ```bash
-    python 4_Applique_EDSR.py --src_dir "mon_super_dataset_val/landsat8" --dst_dir "resultats_finaux_EDSR" --checkpoint "resultats_training/best_model.pth" --tile_size 160 --overlap 32
-    ```
+### Phase 3 : Modèle ESRGAN (Fidélité Perceptive)
+*   **`5_Entrainement_ESRGAN.py`** : Entraîne un Generative Adversarial Network (ESRGAN). Ce script est conçu en deux étapes : une phase de "Warmup" (apprentissage basé uniquement sur la perte L1 pour stabiliser la géométrie), suivie de l'activation du Discriminateur (*Relativistic GAN*) et de la perte perceptuelle (*VGG Loss*)[cite: 8]. Astuce technique : la bande infrarouge (NIR) est dupliquée sur 3 canaux pour simuler une image compatible avec les poids ImageNet du VGG19[cite: 8].
+*   **`6_Applique_ESRGAN.py`** : Script d'inférence pour le modèle génératif. Tout comme l'EDSR, il s'applique de manière tuilée (*Tiling*) sur de grandes scènes pour produire des images aux textures ultra-réalistes, reconstruites tout en préservant les métadonnées géospatiales[cite: 9].
 
-### Phase 3 : Modèle ESRGAN (Baseline perceptuelle)
-*   **Étape 5 : Entraînement ESRGAN** : Entraînement génératif pour obtenir un meilleur résultat visuel (processus plus long)[cite: 1].
-    ```bash
-    python 5_Entrainement_ESRGAN.py --data_dir "dataset_final_npy" --out_dir "resultats_training_esrgan" --epochs 100 --warmup 10 --batch 16
-    ```
-*   **Étape 6 : Application ESRGAN** : Application sur le dossier de validation[cite: 1].
-    ```bash
-    python 6_Applique_ESRGAN.py --src_dir "mon_super_dataset_val/landsat8" --dst_dir "resultats_finaux_ESRGAN" --checkpoint "resultats_training_esrgan/last_G.pth"
-    ```
-
-### Phase 4 : Modèle Hybride
-*   **Étape 7 : Entraînement Hybride** : Fine-tuning associant SAM et GAN. Ce processus repart du modèle EDSR (`best_model.pth`) pour gagner en stabilité et en vitesse[cite: 1].
-    ```bash
-    python 7_Entrainement_Hybride.py --data_dir "dataset_final_npy" --out_dir "resultats_training_hybrid" --pretrained "resultats_training/best_model.pth" --epochs 50 --batch 16 --lambda_sam 0.5
-    ```
-*   **Étape 8 : Application Hybride** : Évaluation finale du modèle hybride sur les données de validation[cite: 1].
-    ```bash
-    python 8_Applique_Hybride.py --src_dir "mon_super_dataset_val/landsat8" --dst_dir "resultats_finaux_Hybrid" --checkpoint "resultats_training_hybrid/last_G.pth"
-    ```
+### Phase 4 : Modèle Hybride (Le compromis)
+*   **`7_Entrainement_Hybride.py`** : Le cœur de l'innovation du projet. Ce script procède à un *fine-tuning* (ré-entraînement fin) en partant des poids du modèle EDSR pré-entraîné[cite: 10]. Il utilise une fonction de perte (Loss) composite unique qui équilibre :
+    *   La perte **L1** (fidélité pixel à pixel)[cite: 10].
+    *   La perte **Adversariale et Perceptuelle** (pour regagner des textures fines)[cite: 10].
+    *   La perte **SAM (Spectral Angle Mapper)**, qui contraint physiquement le réseau à préserver la signature colorimétrique/spectrale exacte du pixel, évitant ainsi les hallucinations classiques des GANs[cite: 10].
+*   **`8_Applique_Hybride.py`** : Inférence finale permettant d'appliquer le modèle Hybride sur le jeu de données test. Le résultat délivre des cartes alliant la précision spectrale requise pour la science (calcul d'indices) à la définition visuelle propre aux modèles génératifs[cite: 11].
 
 ## Auteur
 *   **Mohamed Bouzenad** - *Master of Science in Environmental Science* - [Université de Lausanne (UNIL)](https://www.unil.ch/masterenvi)[cite: 2].
