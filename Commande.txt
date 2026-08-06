@@ -1,0 +1,49 @@
+# ==============================================================================
+# ETAPE 1 : EXTRACTION & TRI (80% Train / 20% Val)
+# ==============================================================================
+# Va créer deux dossiers :
+# 1. "mon_super_dataset" (pour apprendre)
+# 2. "mon_super_dataset_val" (pour tester à la fin)
+python 1_patch_extracteur.py --landsat "D:/Donnees/Landsat8" --sentinel "D:/Donnees/Sentinel2" --export "mon_super_dataset" --visu
+
+# ==============================================================================
+# ETAPE 2 : PREPARATION (Conversion rapide)
+# ==============================================================================
+# On prend le dossier d'entraînement (mon_super_dataset) et on le convertit en .npy
+python 2_prepare_data.py --l8_dir "mon_super_dataset/landsat8" --s2_dir "mon_super_dataset/sentinel2" --out_dir "dataset_final_npy" --patch 32 --workers 8
+
+# ==============================================================================
+# ETAPE 3 : ENTRAINEMENT (Le Cerveau)
+# ==============================================================================
+# On entraîne le modèle sur les .npy
+python 3_Entrainement_EDSR.py --data_dir "dataset_final_npy" --out_dir "resultats_training" --epochs 50 --batch_size 16 --visu
+
+# ==============================================================================
+# ETAPE 4 : APPLICATION (L'Examen Final)
+# ==============================================================================
+# ATTENTION : Ici on pointe vers "mon_super_dataset_val" (les 20% cachés)
+python 4_Applique_EDSR.py --src_dir "mon_super_dataset_val/landsat8" --dst_dir "resultats_finaux_EDSR" --checkpoint "resultats_training/best_model.pth" --tile_size 160 --overlap 32
+
+# ==============================================================================
+# ETAPE 5 : ENTRAINEMENT ESRGAN (Le GAN)
+# ==============================================================================
+# Plus long mais meilleur résultat visuel
+python 5_Entrainement_ESRGAN.py --data_dir "dataset_final_npy" --out_dir "resultats_training_esrgan" --epochs 100 --warmup 10 --batch 16
+
+# ==============================================================================
+# ETAPE 6 : APPLICATION ESRGAN
+# ==============================================================================
+# On applique sur le même dossier de test (Val 20%)
+python 6_Applique_ESRGAN.py --src_dir "mon_super_dataset_val/landsat8" --dst_dir "resultats_finaux_ESRGAN" --checkpoint "resultats_training_esrgan/last_G.pth"
+
+# ==============================================================================
+# ETAPE 7 : ENTRAINEMENT HYBRIDE (Fine-tuning SAM + GAN)
+# ==============================================================================
+# On repart du modèle EDSR (best_model.pth) pour aller plus vite et être plus stable
+python 7_Entrainement_Hybride.py --data_dir "dataset_final_npy" --out_dir "resultats_training_hybrid" --pretrained "resultats_training/best_model.pth" --epochs 50 --batch 16 --lambda_sam 0.5
+
+# ==============================================================================
+# ETAPE 8 : APPLICATION HYBRIDE
+# ==============================================================================
+# On applique sur le même dossier de test (Val 20%)
+python 8_Applique_Hybride.py --src_dir "mon_super_dataset_val/landsat8" --dst_dir "resultats_finaux_Hybrid" --checkpoint "resultats_training_hybrid/last_G.pth"

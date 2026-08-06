@@ -1,0 +1,358 @@
+// --- NETTOYAGE ---
+Map.clear();
+print('\u200B');
+
+// --- PARAMÈTRES GLOBAUX ---
+var startDate = ee.Date('2015-06-23');
+var endDate   = ee.Date('2024-12-31');
+var bufferMeters = 10000;
+var maxPairsPerPoint = 5;
+var maxDaysDifference = 10;
+var NB_RANDOM = 5; // nombre de paires affichées au hasard
+
+// Sélection de points à traiter : 'all' | 'range' | 'list'
+var PROCESS_MODE = 'list';   // 'range', 'list' ou 'all'
+var POINT_RANGE  = [31, 50];   // inclusif : [11, 20] pour P11..P20
+var POINT_LIST   = [21, 30 ,33, 35];// utilisé si PROCESS_MODE='list'
+
+// Tag de run (unique par batch). Tu peux mettre "B1", "B2", etc.
+var RUN_TAG = (new Date()).toISOString().slice(0,16).replace(/[:T]/g,''); // ex: 20251028_0930
+
+// --- COORDONNÉES AVEC ID STABLE [lon, lat, pid] ---
+var coords = [
+  // URBAIN (20)
+  [139.6917, 35.6895, "P01"],  [-118.2437, 34.0522, "P02"], [2.3522, 48.8566, "P03"],
+  [77.1025, 28.7041, "P04"],   [31.2357, 30.0444, "P05"],   [2.1734, 41.3851, "P06"],
+  [3.3792, 6.5244, "P07"],     [-46.6333, -23.5505, "P08"], [121.4737, 31.2304, "P09"],
+  [18.4241, -33.9249, "P10"],  [-74.0060, 40.7128, "P11"],  [-99.1332, 19.4326, "P12"],
+  [28.0473, -26.2041, "P13"],  [36.8219, -1.2921, "P14"],   [28.9784, 41.0082, "P15"],
+  [37.6173, 55.7558, "P16"],   [106.8456, -6.2088, "P17"],  [126.9780, 37.5665, "P18"],
+  [72.8777, 19.0760, "P19"],   [-43.1729, -22.9068, "P20"],
+
+  // MONTAGNES (7)
+  [-77.609, -9.121, "P21"],   [-70.0100, -32.6530, "P22"], [-106.4454, 39.1178, "P23"],
+  [-5.5770, 31.0600, "P24"],   [42.7360, 13.1580, "P25"],   [42.4390, 43.3490, "P26"],
+  [76.5133, 35.6586, "P27"],
+
+  // FORÊTS (5)
+  [-60.0250, -3.1180, "P28"],  [19.3000, -2.0000, "P29"],   [-73.244, -3.730, "P30"],
+  [141.3000, -3.0000, "P31"],  [-48.4902, -1.4558, "P32"],
+
+  // GLACE / TOUNDRA (3)
+  [-16.80, 64.45, "P33"],  [16.2500, 78.2000, "P34"],   [-73.50, -47.15, "P35"],
+
+  // CÔTES / DELTAS / ÎLES (7)
+  [31.0000, 30.5000, "P36"],   [-90.4500, 29.2000, "P37"],  [106.7500, 10.0000, "P38"],
+  [89.3000, 22.0000, "P39"],   [73.2200, 4.2000, "P40"],    [130.5000, -0.3000, "P41"],
+  [6.2000, 62.1000, "P42"],
+
+  // AGRICOLE / STEPPE (5)
+  [-93.3120, 41.9210, "P43"],  [35.1500, 31.5000, "P44"],   [113.6000, 34.7500, "P45"],
+  [74.9000, 31.5000, "P46"],   [-61.0000, -33.0000, "P47"],
+
+  // DÉSERTS (3)
+  [15.9150, -24.7310, "P48"],  [53.7700, 22.9800, "P49"],   [101.0800, 40.3000, "P50"]
+];
+
+// --- MASQUE NUAGES SENTINEL-2 (L1C) ---
+function maskS2clouds_L1C(image) {
+  var bandNames = image.bandNames();
+  var hasQA60 = bandNames.contains('QA60');
+  var hasMSK_CLOUD = bandNames.contains('MSK_CLASSI_OPAQUE');
+  var mask = ee.Algorithms.If(
+    hasQA60,
+    image.select('QA60').bitwiseAnd(1 << 10).eq(0)
+      .and(image.select('QA60').bitwiseAnd(1 << 11).eq(0)),
+    ee.Algorithms.If(
+      hasMSK_CLOUD,
+      image.select('MSK_CLASSI_OPAQUE').neq(1)
+        .and(image.select('MSK_CLASSI_CIRRUS').neq(1)),
+      ee.Image(1)
+    )
+  );
+  return image.updateMask(mask);
+}
+
+// --- OUTILS DATES & PID ---
+function getDateString(time) {
+  var d = new Date(time);
+  return d.getFullYear() + ("0"+(d.getMonth()+1)).slice(-2) + ("0"+d.getDate()).slice(-2);
+}
+function pidOrder(pid) {
+  var m = String(pid||'').match(/\d+/);
+  return m ? parseInt(m[0], 10) : 1e9;
+}
+function pidNum(pid) { return pidOrder(pid); }
+
+// --- UTM dynamique : bon EPSG par point ---
+function utmEpsgFor(lon, lat) {
+  var zone = Math.floor((lon + 180) / 6) + 1;
+  if (zone < 1) zone = 1;
+  if (zone > 60) zone = 60;
+  // Exception Norvège
+  if (lat >= 56 && lat < 64 && lon >= 3 && lon < 12) zone = 32;
+  // Exceptions Svalbard
+  if (lat >= 72 && lat < 84) {
+    if (lon >=   0 && lon <  9) zone = 31;
+    else if (lon >=  9 && lon < 21) zone = 33;
+    else if (lon >= 21 && lon < 33) zone = 35;
+    else if (lon >= 33 && lon < 42) zone = 37;
+  }
+  var hemi = (lat >= 0) ? 326 : 327; // 326xx Nord, 327xx Sud
+  return 'EPSG:' + hemi + (zone < 10 ? '0' + zone : zone);
+}
+
+// --- FILTRAGE DES POINTS À TRAITER ---
+function includePid(pid) {
+  var n = pidNum(pid);
+  if (PROCESS_MODE === 'all') return true;
+  if (PROCESS_MODE === 'range') {
+    var a = Math.min(POINT_RANGE[0], POINT_RANGE[1]);
+    var b = Math.max(POINT_RANGE[0], POINT_RANGE[1]);
+    return n >= a && n <= b;
+  }
+  if (PROCESS_MODE === 'list') {
+    // côté client pour simplicité
+    return POINT_LIST.indexOf(n) !== -1;
+  }
+  return true;
+}
+var coordsFiltered = coords.filter(function(row){ return includePid(row[2]); });
+print('Points sélectionnés (' + PROCESS_MODE + '):',
+      coordsFiltered.map(function(r){return r[2];}));
+
+// --- EXPORT IMAGES (CRS UTM dynamique) ---
+function exportAllBands(image, type, folder, region, pairIndex, pid, lon, lat) {
+  var scale;
+  if (type === 'landsat8') { scale = 30; }
+  else if (type === 'sentinel2') { scale = 10; }
+  else { print('!! Type inconnu pour exportAllBands:', type); return; }
+
+  var crsStr = utmEpsgFor(lon, lat);
+
+  var date = ee.Date(image.get('system:time_start')).format('YYYYMMdd');
+  date.getInfo(function(dateStr) {
+    var base = pid + '_' + type + '_' + dateStr + '_pair' + pairIndex + '_' + RUN_TAG;
+    var regionInfo = region && region.getInfo ? region.getInfo() : null;
+    if (regionInfo && regionInfo.coordinates && regionInfo.coordinates.length > 0) {
+      Export.image.toDrive({
+        image: image.clip(region).toFloat(),
+        description: base,
+        folder: folder,
+        fileNamePrefix: base,
+        region: region,
+        scale: scale,
+        crs: crsStr,
+        maxPixels: 1e13
+      });
+    } else {
+      print('!! CRS/region invalide pour', base, '→ pas d’export');
+    }
+  });
+}
+
+// --- STRUCTURES DE CONTRÔLE ---
+var displayCandidates = []; // pour l'affichage aléatoire
+var csvRows = [];           // pour le CSV (toutes les paires valides)
+var pointsDone = 0;
+
+// Mélange Fisher-Yates
+function shuffleInPlace(arr) {
+  for (var i = arr.length - 1; i > 0; i--) {
+    var r = Math.floor(Math.random() * (i + 1));
+    var tmp = arr[i]; arr[i] = arr[r]; arr[r] = tmp;
+  }
+}
+
+// --- EXPORT CSV (après que tous les points soient terminés) ---
+function exportPairsCSV() {
+  if (csvRows.length === 0) {
+    print('Aucune paire à exporter en CSV.');
+    return;
+  }
+  var fc = ee.FeatureCollection(
+    ee.List(csvRows).map(function(d) { d = ee.Dictionary(d); return ee.Feature(null, d); })
+  );
+
+  Export.table.toDrive({
+    collection: fc,
+    description: 'pairs_summary_csv_' + RUN_TAG,
+    folder: 'Thesis_final',
+    fileNamePrefix: 'pairs_summary_' + RUN_TAG,
+    fileFormat: 'CSV'
+  });
+
+  print('Export CSV déclenché : Thesis_final/pairs_summary_' + RUN_TAG + '.csv');
+}
+
+// Affiche NB_RANDOM paires au hasard (et log trié par point)
+function displayRandomPairs() {
+  if (displayCandidates.length === 0) {
+    print('Aucune paire candidate à afficher.');
+    return;
+  }
+  shuffleInPlace(displayCandidates);
+  var chosen = displayCandidates.slice(0, Math.min(NB_RANDOM, displayCandidates.length));
+
+  chosen.sort(function(a, b) { return pidOrder(a.pid) - pidOrder(b.pid); });
+
+  print('=== PAIRES AFFICHÉES ALÉATOIRES (triées par point) ===');
+  chosen.forEach(function(c, idx) {
+    print('> ' + c.pid + ' — Paire ' + c.pairIndex);
+    print('   Landsat 8 : ' + c.l8id);
+    print('   Sentinel-2 : ' + c.s2id);
+    print('   Δ jours    : ' + c.diffDays);
+  });
+
+  chosen.forEach(function(c, idx) {
+    var l8Img = ee.Image('LANDSAT/LC08/C02/T1_TOA/' + c.l8id);
+    var s2Img = ee.Image('COPERNICUS/S2/' + c.s2id);
+    var region = l8Img.geometry().intersection(s2Img.geometry(), 1);
+
+    Map.addLayer(region, {color: 'green'}, 'Rand ' + (idx+1) + ' — ' + c.pid);
+    Map.addLayer(l8Img.clip(region), {bands: ['B4','B3','B2'], min: 0, max: 0.3},  'Rand ' + (idx+1) + ' L8 ' + c.pid);
+    Map.addLayer(s2Img.clip(region), {bands: ['B4','B3','B2'], min: 0, max: 3000}, 'Rand ' + (idx+1) + ' S2 ' + c.pid);
+    if (idx === 0) Map.centerObject(region, 12);
+  });
+
+  print('Affichage terminé : ' + chosen.length + ' paires aléatoires visibles.');
+}
+
+// --- PIPELINE D'UN POINT ---
+function runForPoint(lon, lat, pid) {
+  var point = ee.Geometry.Point([lon, lat]);
+  var searchArea = point.buffer(bufferMeters);
+
+  var L8 = ee.ImageCollection('LANDSAT/LC08/C02/T1_TOA')
+    .filterDate(startDate, endDate)
+    .filterBounds(searchArea)
+    .filter(ee.Filter.lt('CLOUD_COVER', 20))
+    .sort('system:time_start');
+
+  var S2 = ee.ImageCollection('COPERNICUS/S2')
+    .filterDate(startDate, endDate)
+    .filterBounds(searchArea)
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 10))
+    .map(maskS2clouds_L1C)
+    .sort('system:time_start');
+
+  var l8List = L8.limit(50).toList(50);
+  var s2List = S2.limit(150).toList(150);
+
+  var l8Meta = l8List.map(function(img) {
+    img = ee.Image(img);
+    return { id: img.get('system:index'), time: img.get('system:time_start') };
+  });
+  var s2Meta = s2List.map(function(img) {
+    img = ee.Image(img);
+    return { id: img.get('system:index'), time: img.get('system:time_start') };
+  });
+
+  ee.List(l8Meta).getInfo(function(l8s) {
+    ee.List(s2Meta).getInfo(function(s2s) {
+      var l8Unused = l8s.slice();
+      var s2Unused = s2s.slice();
+      var matchedPairs = [];
+      var pairsFound = 0;
+      var l8DatesUsed = [];
+      var s2DatesUsed = [];
+
+      while (l8Unused.length > 0 && s2Unused.length > 0 && pairsFound < maxPairsPerPoint) {
+        var bestPair = null, bestL8Idx = -1, bestS2Idx = -1, minDiff = Infinity;
+
+        for (var i = 0; i < l8Unused.length; i++) {
+          var l8 = l8Unused[i];
+          var l8Day = getDateString(l8.time);
+          if (l8DatesUsed.indexOf(l8Day) !== -1) continue;
+
+          for (var j = 0; j < s2Unused.length; j++) {
+            var s2 = s2Unused[j];
+            var s2Day = getDateString(s2.time);
+            if (s2DatesUsed.indexOf(s2Day) !== -1) continue;
+
+            var diffDays = Math.abs(l8.time - s2.time) / (1000*60*60*24);
+            if (diffDays <= maxDaysDifference && diffDays < minDiff) {
+              minDiff = diffDays;
+              bestPair = {l8: l8, s2: s2, diff: diffDays, l8Day: l8Day, s2Day: s2Day};
+              bestL8Idx = i; bestS2Idx = j;
+            }
+          }
+        }
+
+        if (bestPair) {
+          matchedPairs.push(bestPair);
+          l8DatesUsed.push(bestPair.l8Day);
+          s2DatesUsed.push(bestPair.s2Day);
+          l8Unused.splice(bestL8Idx, 1);
+          s2Unused.splice(bestS2Idx, 1);
+          pairsFound++;
+        } else {
+          l8Unused.splice(0,1);
+        }
+      }
+
+      // --- LOG STRUCTURÉ ---
+      print('-------------------------');
+      print('POINT ' + pid);
+      print('Coordonnées :', lon, lat);
+      print('Paires appariées :', matchedPairs.length);
+      print('-------------------------');
+
+      matchedPairs.sort(function(a, b) { return a.l8.time - b.l8.time; });
+
+      matchedPairs.forEach(function(pair, k) {
+        var l8id = pair.l8.id, s2id = pair.s2.id;
+        var l8date = new Date(pair.l8.time);
+        var s2date = new Date(pair.s2.time);
+        var diffDays = pair.diff;
+
+        var l8Img = ee.Image('LANDSAT/LC08/C02/T1_TOA/' + l8id);
+        var s2Img = ee.Image('COPERNICUS/S2/' + s2id);
+
+        var region = l8Img.geometry().intersection(s2Img.geometry(), 1);
+        var intersectionArea = region.area(1).getInfo();
+        var regionInfo = region.getInfo();
+        var hasGeom = regionInfo && regionInfo.coordinates && regionInfo.coordinates.length > 0;
+
+        if (hasGeom && intersectionArea > 100000) { // > 0.1 km²
+          exportAllBands(l8Img, 'landsat8',  'Thesis_final', region, k+1, pid, lon, lat);
+          exportAllBands(s2Img, 'sentinel2', 'Thesis_final', region, k+1, pid, lon, lat);
+
+          displayCandidates.push({
+            pid: pid,
+            pairIndex: k+1,
+            l8id: l8id,
+            s2id: s2id,
+            diffDays: Math.round(diffDays * 10) / 10
+          });
+
+          csvRows.push({
+            point: pid,
+            pair_index: k + 1,
+            lon: lon,
+            lat: lat,
+            l8_id: l8id,
+            s2_id: s2id,
+            l8_date: l8date.toISOString().slice(0,10),
+            s2_date: s2date.toISOString().slice(0,10),
+            diff_days: Math.round(diffDays * 10) / 10,
+            run_tag: RUN_TAG
+          });
+        } else {
+          // Intersection trop petite ou invalide → ignorée
+        }
+      });
+
+      pointsDone++;
+      if (pointsDone === coordsFiltered.length) {
+        displayRandomPairs(); // affichage aléatoire (NB_RANDOM)
+        exportPairsCSV();     // export du CSV récapitulatif
+      }
+    });
+  });
+}
+
+// --- LANCEMENT (sur la sélection) ---
+coordsFiltered.forEach(function(row){
+  runForPoint(row[0], row[1], row[2]);
+});
