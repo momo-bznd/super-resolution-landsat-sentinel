@@ -7,7 +7,7 @@ L'observation de la Terre fait traditionnellement face à un compromis spatio-te
 
 En s'appuyant sur l'apprentissage profond (*Deep Learning*), ce pipeline explore la Super-Résolution d'Image Unique (SISR) appliquée à la télédétection multispectrale (Bandes Bleu, Vert, Rouge, et Proche Infrarouge)[cite: 2, 4]. Le défi principal étudié ici est la gestion du "Compromis Perception-Distorsion" (*Perception-Distortion Tradeoff*) : comment générer des textures visuellement réalistes sans corrompre la signature radiométrique/spectrale du pixel indispensable aux calculs d'indices environnementaux comme le NDVI[cite: 2].
 
-## ⚠️ Reproduction du Dataset (Data-Centric AI)
+##  Reproduction du Dataset (Data-Centric AI)
 L'intelligence artificielle générative étant dépourvue de compréhension sémantique, la performance des réseaux dépend strictement de la qualité du corpus d'entraînement (*Data-Centric AI*)[cite: 2]. Le jeu de données utilisé n'étant pas hébergé dans ce dépôt, **vous devez générer les données brutes via Google Earth Engine (GEE)**.
 
 1. **Extraction GEE (`CodeGEE.txt`)** : À exécuter dans le *Code Editor* de Google Earth Engine. L'algorithme cible 56 points géographiques répartis mondialement et sélectionnés via un échantillonnage stratifié (forêts, zones urbaines selon les *Local Climate Zones*, milieux arides, deltas, etc.)[cite: 2, 7].
